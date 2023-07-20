@@ -86,12 +86,12 @@ const config: HardhatUserConfig = {
         clear: true,
         runOnCompile: false,
     },
-    contractSizer: {
-        alphaSort: true,
-        runOnCompile: true,
-        disambiguatePaths: false,
-        only: ["VerdantMarket"],
-    },
+    // contractSizer: {
+    //     alphaSort: true,
+    //     runOnCompile: true,
+    //     disambiguatePaths: false,
+    //     only: ["VerdantMarket"],
+    // },
     gasReporter: {
         currency: "ETH",
         gasPrice: 10,
