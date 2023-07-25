@@ -134,6 +134,8 @@ contract MarketPlace is ReentrancyGuard {
         );
         require(success, "NFT transfer failed");
         delete asks[nftAddress][tokenId];
+        delete idToAuction[nftToAuctionId[nftAddress][tokenId]];
+        delete nftToAuctionId[nftAddress][tokenId];
     }
 
     function createBid(
@@ -149,15 +151,18 @@ contract MarketPlace is ReentrancyGuard {
             auction.exist == true,
             "Owner have not created auction for this NFT yet"
         );
-        require(auction.seller == msg.sender, "Can not bid your own auction");
-        if (auction.tokenPayment == address(0)) {
+        require(auction.seller != msg.sender, "Can not bid your own auction");
+        if (tokenPayment == address(0)) {
             require(msg.value == price, "Value must be equal to what was bid");
         } else {
-            IERC20(auction.tokenPayment).safeTransfer(
+            IERC20(tokenPayment).allowance(msg.sender, address(this));
+            IERC20(tokenPayment).safeTransferFrom(
+                msg.sender,
                 address(this),
                 price
             );
         }
+        bidId.increment();
         idToBid[id] = Bid({
             id: bidId.current(),
             price: price,
@@ -167,8 +172,7 @@ contract MarketPlace is ReentrancyGuard {
             tokenId: tokenId,
             auctionId: id
         });
-
-        bidId.increment();
+        bidIdToAuctionId[bidId.current()] = id;
         treasury[msg.sender][tokenPayment] += price;
     }
 
@@ -237,7 +241,8 @@ contract MarketPlace is ReentrancyGuard {
         address nftAddress = address(nft);
         uint256 id = nftToAuctionId[nftAddress][tokenId];
         Auction memory auction = idToAuction[id];
-        require(auction.exist == true, "You have created auction for this NFT");
+        require(auction.exist == false, "You have created auction for this NFT");
+        auctionId.increment();
         uint256 currentId = auctionId.current();
         idToAuction[currentId] = Auction({
             id: currentId,
@@ -248,17 +253,15 @@ contract MarketPlace is ReentrancyGuard {
             nftAddress: nftAddress,
             tokenId: tokenId
         });
-        auctionId.increment();
+        nftToAuctionId[nftAddress][tokenId] = currentId;
     }
 
-    function deleteAuction(ERC721Token nft, uint256 tokenId) external {
-        address nftAddress = address(nft);
-        uint256 id = nftToAuctionId[nftAddress][tokenId];
+    function deleteAuction(uint256 id) external {
         Auction memory auction = idToAuction[id];
         require(auction.exist == true, "Auction not exist");
         require(auction.seller == msg.sender, "Not auction owner");
 
-        delete nftToAuctionId[nftAddress][tokenId];
+        delete nftToAuctionId[auction.nftAddress][auction.tokenId];
         delete idToAuction[id];
     }
 
@@ -273,6 +276,7 @@ contract MarketPlace is ReentrancyGuard {
         Sell memory sell = idToSell[id];
         require(sell.exist == false, "You have listed sell this NFT");
         nftToSellId[nftAddress][tokenId_] = sellId.current();
+        sellId.increment();
         idToSell[sellId.current()] = Sell({
             id: sellId.current(),
             exist: true,
@@ -282,7 +286,7 @@ contract MarketPlace is ReentrancyGuard {
             nftAddress: nftAddress,
             tokenPayment: tokenPayment_
         });
-        sellId.increment();
+        nftToSellId[nftAddress][tokenId_] = sellId.current();
     }
 
     function unListSell(uint256 id) external {
@@ -303,7 +307,7 @@ contract MarketPlace is ReentrancyGuard {
     function promptBuy(uint256 sellId_) external payable nonReentrant {
         Sell memory sell = idToSell[sellId_];
         require(sell.exist == true, "Sell not exist");
-        require(sell.seller == msg.sender, "Can not buy your own sell");
+        require(sell.seller != msg.sender, "Can not buy your own sell");
 
         if (sell.tokenPayment == address(0)) {
             require(
@@ -311,7 +315,7 @@ contract MarketPlace is ReentrancyGuard {
                 "Value must be equal to or bigger than the price"
             );
         } else {
-            IERC20(sell.tokenPayment).safeTransfer(address(this), sell.price);
+            IERC20(sell.tokenPayment).safeTransferFrom(msg.sender, sell.seller, sell.price);
         }
 
         bool success = ERC721Token(sell.nftAddress).safeTransferFrom_(
