@@ -2,6 +2,8 @@
 pragma solidity ^0.8.16;
 
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./NFT.sol";
 import "./INFT.sol";
 import "./MockERC721.sol";
@@ -11,29 +13,76 @@ import "@openzeppelin/contracts/utils/Address.sol";
 import "hardhat/console.sol";
 
 contract MarketPlace is ReentrancyGuard {
+    using Counters for Counters.Counter;
     using Address for address payable;
     using NFT for ERC721Token;
+    using SafeERC20 for IERC20;
     struct Ask {
         bool exist;
         address seller;
         address to;
         uint256 price;
+        address tokenPayment;
+        address nftAddress;
+        uint256 tokenId;
     }
-    struct Bid {
-        address buyer;
-        uint256 price;
-    }
-    struct Sell {
+
+    struct Auction {
+        uint256 id;
+        bool exist;
         address seller;
         uint256 price;
+        address tokenPayment;
+        address nftAddress;
+        uint256 tokenId;
+    }
+
+    struct Bid {
+        uint256 id;
+        uint256 price;
+        address buyer;
+        address tokenPayment;
+        address nftAddress;
+        uint256 tokenId;
+        uint256 auctionId;
+    }
+
+    struct Sell {
+        uint256 id;
+        bool exist;
+        address seller;
+        uint256 price;
+        address nftAddress;
+        uint256 tokenId;
+        address tokenPayment;
     }
     mapping(address => mapping(uint256 => Ask)) public asks;
-    mapping(address => mapping(uint256 => Bid)) public bids;
+
+    //mapping id to auction
+    mapping(uint256 => Auction) public idToAuction;
+
+    //mapping nft to auctionId
+    mapping(address => mapping(uint256 => uint256)) public nftToAuctionId;
+
+    //mapping bidId to auctionId
+    mapping(uint256 => uint256) public bidIdToAuctionId;
+
+    //mapping bidId to auctionId
+    mapping(uint256 => Bid) public idToBid;
+
+    //mapping nft to sellId
+    mapping(address => mapping(uint256 => uint256)) public nftToSellId;
+
+    //mapping id to Sell
+    mapping(uint256 => Sell) public idToSell;
+
     mapping(address => mapping(uint256 => Sell)) public sells;
-    mapping(address => mapping(uint256 => address)) public bidOwner;
     mapping(address => mapping(uint256 => address)) public sellOwner;
-    mapping(address => uint256) public treasury;
+    mapping(address => mapping(address => uint256)) public treasury;
     address public admin;
+    Counters.Counter public auctionId;
+    Counters.Counter public bidId;
+    Counters.Counter public sellId;
 
     constructor() {
         admin = msg.sender;
@@ -43,19 +92,22 @@ contract MarketPlace is ReentrancyGuard {
         ERC721Token nft,
         uint256 tokenId,
         address to,
-        uint256 price
+        uint256 price,
+        address tokenPayment
     ) external {
         address nftAddress = address(nft);
         require(
             nft.quantityOf(msg.sender, tokenId) == 1,
             "NFT quantity must be at least 1"
         );
-        require(nft.getApproved(tokenId) == address(this), "Not approved yet");
         asks[nftAddress][tokenId] = Ask({
             exist: true,
             seller: msg.sender,
             to: to,
-            price: price
+            price: price,
+            tokenPayment: tokenPayment,
+            nftAddress: nftAddress,
+            tokenId: tokenId
         });
     }
 
@@ -65,18 +117,15 @@ contract MarketPlace is ReentrancyGuard {
     ) external payable nonReentrant {
         address nftAddress = address(nft);
         Ask memory ask = asks[nftAddress][tokenId];
-        require(ask.exist, "Ask does not exist");
-        require(ask.seller != msg.sender, "Can not accept own ask");
+        require(ask.exist, "Ask not exist");
         require(ask.to == msg.sender, "Ask not exist");
-        require(msg.value >= ask.price, "Not enough value");
-
-        treasury[ask.seller] += ask.price;
-        if (bidOwner[nftAddress][tokenId] != address(0)) {
-            treasury[bids[nftAddress][tokenId].buyer] += bids[nftAddress][
-                tokenId
-            ].price;
-            delete bids[nftAddress][tokenId];
+        require(ask.seller != msg.sender, "Can not accept own ask");
+        if (ask.tokenPayment == address(0)) {
+            require(msg.value >= ask.price, "Not enough value");
+        } else {
+            IERC20(ask.tokenPayment).safeTransfer(address(this), ask.price);
         }
+        treasury[ask.seller][ask.tokenPayment] += ask.price;
         bool success = nft.safeTransferFrom_(
             ask.seller,
             ask.to,
@@ -90,58 +139,83 @@ contract MarketPlace is ReentrancyGuard {
     function createBid(
         ERC721Token nft,
         uint256 tokenId,
-        uint256 price
+        uint256 price,
+        address tokenPayment
     ) external payable nonReentrant {
         address nftAddress = address(nft);
+        uint256 id = nftToAuctionId[nftAddress][tokenId];
+        Auction memory auction = idToAuction[id];
         require(
-            bidOwner[nftAddress][tokenId] != address(0),
-            "Owner have not listed this NFT yet"
+            auction.exist == true,
+            "Owner have not created auction for this NFT yet"
         );
-        require(
-            msg.value > bids[nftAddress][tokenId].price,
-            "Value must bigger than previous bid"
-        );
-        require(msg.value == price, "Value must be equal to what was bid");
-        bids[nftAddress][tokenId].buyer = msg.sender;
-        bids[nftAddress][tokenId].price = msg.value;
-        treasury[bids[nftAddress][tokenId].buyer] += price;
+        require(auction.seller == msg.sender, "Can not bid your own auction");
+        if (auction.tokenPayment == address(0)) {
+            require(msg.value == price, "Value must be equal to what was bid");
+        } else {
+            IERC20(auction.tokenPayment).safeTransfer(
+                address(this),
+                price
+            );
+        }
+        idToBid[id] = Bid({
+            id: bidId.current(),
+            price: price,
+            buyer: msg.sender,
+            tokenPayment: tokenPayment,
+            nftAddress: nftAddress,
+            tokenId: tokenId,
+            auctionId: id
+        });
+
+        bidId.increment();
+        treasury[msg.sender][tokenPayment] += price;
     }
 
-    function acceptBid(ERC721Token nft, uint256 tokenId) external {
-        address nftAddress = address(nft);
-        require(
-            bidOwner[nftAddress][tokenId] != address(0),
-            "You have not listed this NFT yet"
-        );
-        require(nft.quantityOf(msg.sender, tokenId) == 1, "NFT is not yours");
-        require(
-            bids[nftAddress][tokenId].buyer != address(0),
-            "No one bid yet"
-        );
+    function acceptBid(
+        ERC721Token nft_,
+        uint256 tokenId_,
+        uint256 bidId_
+    ) external {
+        address nftAddress = address(nft_);
+        uint256 auctionid = nftToAuctionId[nftAddress][tokenId_];
+        require(bidIdToAuctionId[bidId_] == auctionid, "Bid not exist");
 
-        bool success = nft.safeTransferFrom_(
+        Auction memory auction = idToAuction[auctionid];
+        require(auction.exist, "Auction not exist");
+        require(auction.seller == msg.sender, "Bid not yours");
+
+        Bid memory bid = idToBid[bidId_];
+
+        bool success = nft_.safeTransferFrom_(
             msg.sender,
-            bids[nftAddress][tokenId].buyer,
-            tokenId,
+            bid.buyer,
+            tokenId_,
             new bytes(0)
         );
-        treasury[bids[nftAddress][tokenId].buyer] -= bids[nftAddress][tokenId]
-            .price;
-        treasury[msg.sender] += bids[nftAddress][tokenId].price;
         require(success, "NFT transfer failed");
-        delete asks[nftAddress][tokenId];
-        delete bids[nftAddress][tokenId];
+        treasury[msg.sender][bid.tokenPayment] += bid.price;
+        delete idToBid[bidId_];
+        delete nftToAuctionId[nftAddress][tokenId_];
+        delete idToAuction[auctionid];
     }
 
-    function cancelBid(ERC721Token nft, uint256 tokenId) external {
-        address nftAddress = address(nft);
-        require(bids[nftAddress][tokenId].buyer == msg.sender, "Bid not yours");
-        require(
-            bidOwner[nftAddress][tokenId] != address(0),
-            "You have not listed this NFT yet"
-        );
-        treasury[msg.sender] += bids[nftAddress][tokenId].price;
-        delete bids[nftAddress][tokenId];
+    function cancelBid(
+        ERC721Token nft_,
+        uint256 tokenId_,
+        uint256 bidId_
+    ) external {
+        address nftAddress = address(nft_);
+        uint256 auctionid = nftToAuctionId[nftAddress][tokenId_];
+        require(bidIdToAuctionId[bidId_] == auctionid, "Bid not exist");
+
+        Auction memory auction = idToAuction[auctionid];
+        require(auction.seller == msg.sender, "Bid not yours");
+        Bid memory bid = idToBid[bidId_];
+
+        treasury[msg.sender][bid.tokenPayment] += bid.price;
+
+        delete idToBid[bidId_];
     }
 
     function cancelAsk(ERC721Token nft, uint256 tokenId) external {
@@ -154,104 +228,114 @@ contract MarketPlace is ReentrancyGuard {
         delete asks[nftAddress][tokenId];
     }
 
-    function listToBid(
+    function createAuction(
         ERC721Token nft,
         uint256 tokenId,
-        uint256 firstPrice
+        uint256 firstPrice,
+        address tokenPayment
     ) external {
         address nftAddress = address(nft);
-        require(
-            sellOwner[nftAddress][tokenId] == address(0),
-            "Unlisted sell this NFT first"
-        );
-        require(
-            bidOwner[nftAddress][tokenId] == address(0),
-            "You have listed bid this NFT"
-        );
-        bids[nftAddress][tokenId] = Bid({buyer: address(0), price: firstPrice});
-        bidOwner[nftAddress][tokenId] = msg.sender;
+        uint256 id = nftToAuctionId[nftAddress][tokenId];
+        Auction memory auction = idToAuction[id];
+        require(auction.exist == true, "You have created auction for this NFT");
+        uint256 currentId = auctionId.current();
+        idToAuction[currentId] = Auction({
+            id: currentId,
+            exist: true,
+            seller: msg.sender,
+            price: firstPrice,
+            tokenPayment: tokenPayment,
+            nftAddress: nftAddress,
+            tokenId: tokenId
+        });
+        auctionId.increment();
     }
 
-    function unListBid(ERC721Token nft, uint256 tokenId) external {
+    function deleteAuction(ERC721Token nft, uint256 tokenId) external {
         address nftAddress = address(nft);
-        require(bidOwner[nftAddress][tokenId] == msg.sender, "Not bid owner");
-        bool success = nft.safeTransferFrom_(
-            address(this),
-            msg.sender,
-            tokenId,
-            new bytes(0)
-        );
-        require(success, "NFT transfer failed");
-        delete bids[nftAddress][tokenId];
-        bidOwner[nftAddress][tokenId] = address(0);
+        uint256 id = nftToAuctionId[nftAddress][tokenId];
+        Auction memory auction = idToAuction[id];
+        require(auction.exist == true, "Auction not exist");
+        require(auction.seller == msg.sender, "Not auction owner");
+
+        delete nftToAuctionId[nftAddress][tokenId];
+        delete idToAuction[id];
     }
 
     function listSell(
-        ERC721Token nft,
-        uint256 tokenId,
-        uint256 price
+        ERC721Token nft_,
+        uint256 tokenId_,
+        uint256 price_,
+        address tokenPayment_
     ) external {
-        address nftAddress = address(nft);
-        require(
-            nft.getApproved(tokenId) == address(this),
-            "Approved NFT first"
-        );
-        require(
-            bidOwner[nftAddress][tokenId] == address(0),
-            "Unlisted bid this NFT first"
-        );
-        require(
-            sellOwner[nftAddress][tokenId] == address(0),
-            "You have listed sell this NFT"
-        );
-        sellOwner[nftAddress][tokenId] = msg.sender;
-        sells[nftAddress][tokenId] = Sell({seller: msg.sender, price: price});
+        address nftAddress = address(nft_);
+        uint256 id = nftToSellId[nftAddress][tokenId_];
+        Sell memory sell = idToSell[id];
+        require(sell.exist == false, "You have listed sell this NFT");
+        nftToSellId[nftAddress][tokenId_] = sellId.current();
+        idToSell[sellId.current()] = Sell({
+            id: sellId.current(),
+            exist: true,
+            seller: msg.sender,
+            price: price_,
+            tokenId: tokenId_,
+            nftAddress: nftAddress,
+            tokenPayment: tokenPayment_
+        });
+        sellId.increment();
     }
 
-    function unListSell(ERC721Token nft, uint256 tokenId) external {
-        address nftAddress = address(nft);
-        require(sellOwner[nftAddress][tokenId] == msg.sender, "Not bid owner");
-        bool success = nft.safeTransferFrom_(
+    function unListSell(uint256 id) external {
+        Sell memory sell = idToSell[id];
+        require(sell.exist == true, "Sell not exist");
+        require(sell.seller == msg.sender, "Not sell owner");
+        bool success = ERC721Token(sell.nftAddress).safeTransferFrom_(
             address(this),
             msg.sender,
-            tokenId,
+            sell.tokenId,
             new bytes(0)
         );
         require(success, "NFT transfer failed");
-        delete sells[nftAddress][tokenId];
-        bidOwner[nftAddress][tokenId] = address(0);
+        delete idToSell[id];
+        delete nftToSellId[sell.nftAddress][sell.tokenId];
     }
 
-    function promptBuy(
-        ERC721Token nft,
-        uint256 tokenId
-    ) external payable nonReentrant {
-        address nftAddress = address(nft);
-        require(
-            sellOwner[nftAddress][tokenId] != address(0),
-            "No one listed sell this NFT yet"
-        );
-        Sell memory sell = sells[nftAddress][tokenId];
-        require(
-            msg.value >= sell.price,
-            "Value must be equal to or bigger than the price"
-        );
-        bool success = nft.safeTransferFrom_(
+    function promptBuy(uint256 sellId_) external payable nonReentrant {
+        Sell memory sell = idToSell[sellId_];
+        require(sell.exist == true, "Sell not exist");
+        require(sell.seller == msg.sender, "Can not buy your own sell");
+
+        if (sell.tokenPayment == address(0)) {
+            require(
+                msg.value >= sell.price,
+                "Value must be equal to or bigger than the price"
+            );
+        } else {
+            IERC20(sell.tokenPayment).safeTransfer(address(this), sell.price);
+        }
+
+        bool success = ERC721Token(sell.nftAddress).safeTransferFrom_(
             sell.seller,
             msg.sender,
-            tokenId,
+            sell.tokenId,
             new bytes(0)
         );
         require(success, "NFT transfer failed");
-        treasury[sellOwner[nftAddress][tokenId]] += sell.price;
-        delete sells[nftAddress][tokenId];
-        delete bids[nftAddress][tokenId];
-        sellOwner[nftAddress][tokenId] = address(0);
-        bidOwner[nftAddress][tokenId] = address(0);
+
+        treasury[sell.seller][sell.tokenPayment] += sell.price;
+
+        delete idToSell[sellId_];
+        delete nftToSellId[sell.nftAddress][sell.tokenId];
     }
 
-    function withdraw() external {
-        require(treasury[msg.sender] != 0, "Nothing to withdraw");
-        payable(address(this)).sendValue(treasury[msg.sender]);
+    function withdraw(address token) external {
+        uint256 balance = treasury[msg.sender][token];
+        require(balance != 0, "Nothing to withdraw");
+        if (token == address(0)) {
+            payable(address(this)).sendValue(balance);
+        } else {
+            IERC20(token).safeTransfer(msg.sender, balance);
+        }
+        treasury[msg.sender][token] = 0;
     }
 }
